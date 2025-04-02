@@ -1,3 +1,6 @@
+start the server 
+npx nodemon src/server.js 
+
 run this in cmd 
 change the table name.. 
 which we want to import from mysql to postgres
