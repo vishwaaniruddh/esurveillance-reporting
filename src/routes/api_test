@@ -1,0 +1,4 @@
+run this in cmd 
+change the table name.. 
+which we want to import from mysql to postgres
+Invoke-WebRequest -Uri "http://localhost:3000/copy-table" -Method POST -Headers @{ "Content-Type" = "application/json" } -Body '{"tableName": "buffer_alerts_crt"}'
