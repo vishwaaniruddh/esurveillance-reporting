@@ -66,11 +66,13 @@ function generatePostgresSchema(tableName, schema) {
     else if (type.includes('varchar') || type.includes('text')) type = 'TEXT';
     else if (type.includes('datetime') || type.includes('timestamp')) type = 'TIMESTAMP';
     else if (type.includes('blob')) type = 'BYTEA';
+    else if (type.includes('date')) type = 'DATE';  // For DATE type conversion
 
     return `"${col.Field}" ${type}`;
   }).join(', ');
 
-  return `CREATE TABLE IF NOT EXISTS "${tableName}" (${columns})`;
+  // SQL to drop and then create the table
+  return `DROP TABLE IF EXISTS "${tableName}"; CREATE TABLE IF NOT EXISTS "${tableName}" (${columns})`;
 }
 
 // Worker thread logic for inserting data
@@ -91,20 +93,35 @@ if (!isMainThread) {
     try {
       const client = await pgPool.connect();
       const columns = mysqlSchema.map(col => `"${col.Field}"`).join(', ');
-
+  
       // Convert data into PostgreSQL compatible values
       const values = chunk.map(row => {
         return `(${mysqlSchema.map(col => {
           if (row[col.Field] === null) return 'NULL';
           if (Buffer.isBuffer(row[col.Field])) return `'\\x${row[col.Field].toString('hex')}'`;
-          if (col.Type.toLowerCase().includes('datetime') || col.Type.toLowerCase().includes('timestamp')) {
-            return `'${new Date(row[col.Field]).toISOString()}'`;
+  
+          // Handle DATE fields: Convert to 'YYYY-MM-DD' format
+          if (col.Type.toLowerCase().includes('date')) {
+            const date = new Date(row[col.Field]);
+            return `'${date.toISOString().slice(0, 10)}'`;  // Only take the date part: YYYY-MM-DD
           }
+  
+          // Handle DATETIME or TIMESTAMP fields: Convert to 'YYYY-MM-DD HH:MM:SS' format
+          if (col.Type.toLowerCase().includes('datetime') || col.Type.toLowerCase().includes('timestamp')) {
+            const date = new Date(row[col.Field]);
+            return `'${date.toISOString().slice(0, 19)}'`;  // Convert to YYYY-MM-DD HH:MM:SS format
+          }
+  
+          // For other fields, just return the value as string
           return `'${row[col.Field]}'`;
         }).join(', ')})`;
       }).join(', ');
-
+  
       const insertQuery = `INSERT INTO "${tableName}" (${columns}) VALUES ${values}`;
+  
+      // Log the generated query for debugging
+      console.log("Generated Insert Query:", insertQuery);
+  
       await client.query(insertQuery);
       client.release();
       parentPort.postMessage('success');
@@ -113,6 +130,7 @@ if (!isMainThread) {
       parentPort.postMessage('error');
     }
   }
+  
 
   insertData();
 }

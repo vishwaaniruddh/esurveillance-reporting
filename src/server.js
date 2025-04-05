@@ -17,6 +17,11 @@ fastify.register(require("./routes/fix-columns"));
 fastify.register(require("./routes/fetch-sites"));
 fastify.register(require("./routes/alerts"));
 fastify.register(require("./routes/alertsRoutes"));
+fastify.register(require("./routes/make-alert-report-table"));
+fastify.register(require("./routes/delete-alerts"));
+fastify.register(require("./routes/bulkAutoInsert"));
+
+
 fastify.register(copyTableRoute);  // Register the copy table route
 
 // Ensure Redis is ready before starting the server

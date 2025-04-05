@@ -16,7 +16,7 @@ async function exportAlertsRoutes(fastify, options) {
         SELECT id, alerts_data_date, newtableName 
         FROM alerts_data_tracker_datewise
         WHERE is_viewalertReportCreated = '0' 
-        ORDER BY id DESC LIMIT 1;
+        ORDER BY alerts_data_date DESC LIMIT 1;
       `;
       console.log("Executing trackerQuery:", trackerQuery);
       const trackerResult = await client.query(trackerQuery);
@@ -160,6 +160,146 @@ async function exportAlertsRoutes(fastify, options) {
     }
   });
 
+
+  fastify.get("/export-alerts-specific", async (req, reply) => {
+    const { fromDate, atmid, dvrip } = req.query;
+  
+    if (!fromDate) {
+      return reply.status(400).send({ error: "fromDate is required" });
+    }
+  
+    const client = await fastify.pg.connect();
+    try {
+      console.log("Connecting to PostgreSQL...");
+  
+      const formattedDate = new Date(fromDate).toISOString().split('T')[0].replace(/-/g, '');
+      const tableName = `alerts_${formattedDate}`;
+      const reportDate = formattedDate;
+  
+      console.log("Dynamic table name:", tableName);
+  
+      const sql = `
+        SELECT a.customer, a.bank, a.atmid, a.atmshortname, a.siteaddress,
+               a.dvrip, a.panel_make, a.City, a.state,
+               b.id, b.panelid, b.createtime, b.receivedtime, b.comment,
+               b.zone, b.alarm, b.closedby, b.closedtime, b.sendip, a.zone as zon
+        FROM sites a
+        JOIN ${tableName} b ON (a.oldpanelid = b.panelid OR a.newpanelid = b.panelid)
+        WHERE b.receivedtime BETWEEN '${fromDate} 00:00:00' AND '${fromDate} 23:59:59'
+        ${atmid ? `AND a.atmid = '${atmid}'` : ''}
+        ${dvrip ? `AND a.dvrip = '${dvrip}'` : ''}
+        ORDER BY b.receivedtime DESC
+      `;
+  
+      console.log("Executing SQL query:", sql);
+      const { rows } = await client.query(sql);
+  
+      const totalRecordsQuery = `
+        SELECT COUNT(*) from 
+        sites a
+        JOIN ${tableName} b ON (a.oldpanelid = b.panelid OR a.newpanelid = b.panelid)
+        WHERE b.receivedtime BETWEEN '${fromDate} 00:00:00' AND '${fromDate} 23:59:59'
+        ${atmid ? `AND a.atmid = '${atmid}'` : ''}
+        ${dvrip ? `AND a.dvrip = '${dvrip}'` : ''}
+      `;
+  
+      const totalRecordsResult = await client.query(totalRecordsQuery);
+      const totalRecords = totalRecordsResult.rows[0].count;
+  
+      console.log("Fetched rows:", rows);
+  
+      // Define maximum rows per CSV (800,000)
+      const MAX_RECORDS_PER_CSV = 800000;
+      let chunkedData = [];
+  
+      // Split rows into chunks based on MAX_RECORDS_PER_CSV
+      for (let i = 0; i < rows.length; i += MAX_RECORDS_PER_CSV) {
+        chunkedData.push(rows.slice(i, i + MAX_RECORDS_PER_CSV));
+      }
+  
+      const filePaths = [];
+  
+      for (let i = 0; i < chunkedData.length; i++) {
+        const chunk = chunkedData[i];
+        let alerts = [];
+  
+        for (const row of chunk) {
+          let panelTable = getPanelTable(row.Panel_Make);
+  
+          let panelQuery = `SELECT sensorname as description, camera FROM ${panelTable} WHERE zone='${row.zone}' AND scode='${row.alarm}'`;
+          console.log("Executing panel query:", panelQuery);
+          const panelResult = await client.query(panelQuery);
+          const panelData = panelResult.rows[0] || { description: "N/A", Camera: "N/A" };
+  
+          let alarmMessage = panelData.description;
+          if (row.alarm.endsWith("R")) {
+            alarmMessage += " Restoral";
+          }
+  
+          const incidentDateTimeFormatted = formatDateTime(row.receivedtime);
+  
+          alerts.push({
+            clientName: row.customer,
+            incidentNumber: row.id,
+            region: row.zon,
+            ATMID: row.atmid,
+            address: row.siteaddress,
+            city: row.city,
+            state: row.state,
+            zone: row.zone,
+            alarm: row.alarm,
+            incidentCategory: panelData.description,
+            alarmMessage: alarmMessage,
+            incidentDateTime: incidentDateTimeFormatted,
+            alarmReceivedDateTime: incidentDateTimeFormatted,
+            closeDateTime: row.closedtime ? formatDateTime(row.closedtime) : null,
+            DVRIP: row.dvrip,
+            panelMake: row.panel_make,
+            panelID: row.panelid,
+            bank: row.bank,
+            reactive: row.alarm.endsWith("R") ? "Non-Reactive" : "Reactive",
+            closedBy: row.closedby,
+            closedDate: row.closedtime ? formatDateTime(row.closedtime) : null,
+            remark: `${row.closedtime ? formatDateTime(row.closedtime) : ''} * ${row.comment} * ${row.closedby}`,
+            sendIp: row.sendip,
+            testingByServiceTeam: "N/A",
+            testingRemark: "N/A",
+          });
+        }
+  
+        const json2csvParser = new Parser();
+        const csv = json2csvParser.parse(alerts);
+  
+        const filePath = path.join(__dirname, 'reports', `alerts_${reportDate}_part_${i + 1}.csv`);
+        fs.writeFileSync(filePath, csv);
+        filePaths.push(filePath);
+      }
+  
+      const zipFilePath = path.join(__dirname, 'reports', `alerts_${reportDate}.zip`);
+      const output = fs.createWriteStream(zipFilePath);
+      const archive = archiver('zip', { zlib: { level: 9 } });
+  
+      archive.pipe(output);
+      filePaths.forEach((filePath) => {
+        archive.file(filePath, { name: path.basename(filePath) });
+      });
+  
+      archive.finalize();
+  
+      // Send the zip file to the client after it's finalized
+      output.on('close', () => {
+        console.log(`Zipped CSVs successfully created: ${zipFilePath}`);
+        reply.sendFile(zipFilePath);  // Send the zip file as a response
+      });
+  
+    } catch (err) {
+      console.error("Error occurred:", err);
+      reply.status(500).send({ error: "Internal Server Error", message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+  
   // Function to get panel-specific table
   function getPanelTable(panelMake) {
     const panelTables = {

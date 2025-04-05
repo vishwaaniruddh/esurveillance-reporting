@@ -2,110 +2,113 @@ const fastifyPlugin = require("fastify-plugin");
 
 async function alertsRoutes(fastify, options) {
   fastify.get("/fetch-alerts", async (req, reply) => {
+    const { fromDate, atmid, dvrip, page = 1, limit = 20 } = req.query;
+
+    if (!fromDate) {
+      return reply.status(400).send({ error: "fromDate is required" });
+    }
+
     const client = await fastify.pg.connect();
     try {
       console.log("Connecting to PostgreSQL...");
 
-      // Get latest unprocessed alert entry
-      const trackerQuery = `
-        SELECT id, alerts_data_date, newtableName 
-        FROM alerts_data_tracker_datewise
-        WHERE is_viewalertReportCreated = '0' 
-        ORDER BY id DESC LIMIT 1;
-      `;
-      console.log("Executing trackerQuery:", trackerQuery);
-      const trackerResult = await client.query(trackerQuery);
-      console.log("Tracker result:", trackerResult.rows);
+      // Format the date for the table name (alerts_YYYYMMDD)
+      const formattedDate = new Date(fromDate).toISOString().split('T')[0].replace(/-/g, '');  // Format as YYYYMMDD
+      const tableName = `alerts_${formattedDate}`;  // Dynamic table name
 
-      if (trackerResult.rowCount === 0) {
-        console.log("No new alerts to process.");
-        return reply.send({ message: "No new alerts to process." });
-      }
-      const { id: recordId, alerts_data_date, newtablename } = trackerResult.rows[0]; 
-      const newtableName = newtablename; // Fix assignment
-      
-      const reportDate = new Date(alerts_data_date).toISOString().split('T')[0];
+      console.log("Dynamic table name:", tableName);
 
-      console.log("✅ Using formatted alerts_data_date:", reportDate);
-      
-      console.log("Found alerts data:", { recordId, alerts_data_date, newtableName });
+      // Pagination calculations
+      const offset = (page - 1) * limit;
 
-      // Define SQL query
+      // Construct SQL query with dynamic table name, pagination, and filtering
       const sql = `
-        SELECT a.Customer, a.Bank, a.ATMID, a.ATMShortName, a.SiteAddress,
-               a.DVRIP, a.Panel_Make, a.City, a.State,
+         SELECT a.customer, a.bank, a.atmid, a.atmshortname, a.siteaddress,
+               a.dvrip, a.panel_make, a.City, a.state,
                b.id, b.panelid, b.createtime, b.receivedtime, b.comment,
-               b.zone, b.alarm, b.closedBy, b.closedtime, b.sendip,a.Zone as zon
+               b.zone, b.alarm, b.closedby, b.closedtime, b.sendip, a.zone as zon
         FROM sites a
-        JOIN ${newtableName} b ON (a.OldPanelID = b.panelid OR a.NewPanelID = b.panelid)
-        WHERE b.receivedtime BETWEEN '${reportDate} 00:00:00' AND '${reportDate} 23:59:59'
+        JOIN ${tableName} b ON (a.oldpanelid = b.panelid OR a.newpanelid = b.panelid)
+        WHERE b.receivedtime BETWEEN '${fromDate} 00:00:00' AND '${fromDate} 23:59:59'
+        ${atmid ? `AND a.atmid = '${atmid}'` : ''}
+        ${dvrip ? `AND a.dvrip = '${dvrip}'` : ''}
+
+      
         ORDER BY b.receivedtime DESC
-        LIMIT 1000
+        LIMIT ${limit} OFFSET ${offset}
       `;
-
-
-
 
       console.log("Executing SQL query:", sql);
       const { rows } = await client.query(sql);
+      
+      // Query for total records without pagination
+      const totalRecordsQuery = `
+        SELECT COUNT(*)  from 
+        sites a
+        JOIN ${tableName} b ON (a.oldpanelid = b.panelid OR a.newpanelid = b.panelid)
+        WHERE b.receivedtime BETWEEN '${fromDate} 00:00:00' AND '${fromDate} 23:59:59'
+        ${atmid ? `AND a.atmid = '${atmid}'` : ''}
+        ${dvrip ? `AND a.dvrip = '${dvrip}'` : ''}
+        
+      `;
+      console.log("totalRecordsQuery Executing SQL query:", totalRecordsQuery);
+
+      const totalRecordsResult = await client.query(totalRecordsQuery);
+      const totalRecords = totalRecordsResult.rows[0].count;
+
       console.log("Fetched rows:", rows);
 
       let alerts = [];
       for (const row of rows) {
-        console.log("Processing row:", row);
-
         let panelTable = getPanelTable(row.Panel_Make);
-        let id = getPanelTable(row.id);
 
-
-        let panelQuery = `SELECT SensorName as Description, Camera FROM ${panelTable} WHERE ZONE='${row.zone}' AND SCODE='${row.alarm}'`;
+        let panelQuery = `SELECT sensorname as description, camera FROM ${panelTable} WHERE zone='${row.zone}' AND scode='${row.alarm}'`;
         console.log("Executing panel query:", panelQuery);
         const panelResult = await client.query(panelQuery);
-        const panelData = panelResult.rows[0] || { Description: "N/A", Camera: "N/A" };
+        const panelData = panelResult.rows[0] || { description: "N/A", Camera: "N/A" };
 
-        let alarmMessage = panelData.Description;
+        let alarmMessage = panelData.description;
         if (row.alarm.endsWith("R")) {
           alarmMessage += " Restoral";
         }
 
         alerts.push({
-          clientName: row.Customer,
+          clientName: row.customer,
           incidentNumber: row.id,
           region: row.zon,
-          ATMID: row.ATMID,
-          address: row.SiteAddress,
-          city: row.City,
-          state: row.State,
-          zone: row.Zone,
+          ATMID: row.atmid,
+          address: row.siteaddress,
+          city: row.city,
+          state: row.state,
+          zone: row.zone,
           alarm: row.alarm,
-          incidentCategory: panelData.Description,
+          incidentCategory: panelData.description,
           alarmMessage: alarmMessage,
           incidentDateTime: row.receivedtime,
           alarmReceivedDateTime: row.receivedtime,
           closeDateTime: row.closedtime,
-          DVRIP: row.DVRIP,
-          panelMake: row.Panel_Make,
+          DVRIP: row.dvrip,
+          panelMake: row.panel_make,
           panelID: row.panelid,
-          bank: row.Bank,
+          bank: row.bank,
           reactive: row.alarm.endsWith("R") ? "Non-Reactive" : "Reactive",
-          closedBy: row.closedBy,
+          closedBy: row.closedby,
           closedDate: row.closedtime,
-          remark: `${row.closedtime} * ${row.comment} * ${row.closedBy}`,
+          remark: `${row.closedtime} * ${row.comment} * ${row.closedby}`,
           sendIp: row.sendip,
           testingByServiceTeam: "N/A",
           testingRemark: "N/A"
         });
       }
 
-      // Mark the report as created
-      console.log("Marking report as created...");
-      await client.query(`UPDATE alerts_data_tracker_datewise SET is_viewalertReportCreated = 1 WHERE id = $1`, [recordId]);
-
       return reply.send({
+        itemsPerPage : 20, 
         status: "success",
-        reportDate,
         totalAlerts: alerts.length,
-        alerts
+        totalRecords: totalRecords,
+        alerts,
+        totalPages: Math.ceil(totalRecords / limit),
+        currentPage: parseInt(page),
       });
     } catch (err) {
       console.error("Error occurred:", err);
