@@ -16,7 +16,7 @@ async function deleteAlertsRoute(fastify, options) {
     const deleteRecordsBatch = async () => {
       try {
         // SQL query to delete 10,001 records older than 10 days
-        const query = `DELETE FROM backalerts WHERE DATE(receivedtime) in ('2025-03-16','2025-03-17','2025-03-18') LIMIT 5000`;
+        const query = `DELETE FROM backalerts WHERE DATE(receivedtime) in ('2025-03-22','2025-03-23','2025-03-24') LIMIT 5000`;
         // const query = `DELETE FROM backalerts WHERE DATE(receivedtime) < CURDATE() - INTERVAL 10 DAY ORDER BY id ASC LIMIT 5000`;
 
         // Execute the query
